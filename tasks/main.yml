@@ -1,0 +1,228 @@
+---
+- name: Install dependencies (1/2)
+  apt:
+    name: "{{ item }}"
+    state: present
+  with_items:
+    - curl
+    - software-properties-common
+    - apt-transport-https
+    - ca-certificates 
+    - gnupg
+    - lsb-release
+  become: yes
+
+- name: Add ondrej/php repository
+  apt_repository:
+    repo: "ppa:ondrej/php"
+    state: present
+  become: yes
+
+- name: Update apt cache
+  apt:
+    update_cache: yes
+  become: yes
+
+- name: Install dependencies (2/2)
+  apt:
+    name: "{{ item }}"
+    state: present
+  with_items:
+    - php8.1-common
+    - php8.1-cli
+    - php8.1-gd
+    - php8.1-mysql
+    - php8.1-mbstring
+    - php8.1-bcmath
+    - php8.1-xml
+    - php8.1-fpm
+    - php8.1-curl
+    - php8.1-zip
+    - mariadb-server
+    - nginx
+    - tar
+    - unzip
+    - git
+    - redis-server
+    - python3-pip
+    - python3-pymysql
+  become: yes
+
+- name: Install composer
+  shell: curl -sS https://getcomposer.org/installer | sudo php -- --install-dir=/usr/local/bin --filename=composer
+  become: yes
+
+- name: Create panel directory
+  file:
+    path: /var/www/pterodactyl
+    state: directory
+
+- name: Download panel
+  get_url:
+    url: "https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz"
+    dest: "/tmp/panel.tar.gz"
+
+- name: Extract panel
+  unarchive:
+    src: "/tmp/panel.tar.gz"
+    dest: "/var/www/pterodactyl"
+    remote_src: yes
+
+- name: Set permissions (1/2)
+  file:
+    path: /var/www/pterodactyl/storage/*
+    state: directory
+    mode: 0755
+    recurse: yes
+
+- name: Set permissions (2/2)
+  file:
+    path: /var/www/pterodactyl/bootstrap/cache/*
+    state: directory
+    mode: 0755
+    recurse: yes
+
+- name: Create DB
+  mysql_db:
+    name: pterodactyl
+    state: present
+    login_unix_socket: /var/run/mysqld/mysqld.sock
+
+- name: Create DB user
+  mysql_user:
+    name: pterodactyl
+    password: "{{ pteropanel_mysql_password }}"
+    host: localhost
+    priv: "pterodactyl.*:ALL"
+    state: present
+    login_unix_socket: /var/run/mysqld/mysqld.sock
+
+- name: copy .env.example to .env 
+  command: cp .env.example .env
+  args:
+    chdir: /var/www/pterodactyl
+
+- name: install composer  
+  composer:
+    command: install
+    working_dir: /var/www/pterodactyl
+  environment:
+    COMPOSER_NO_INTERACTION: "1"   
+    COMPOSER_ALLOW_SUPERUSER: "1"
+
+- name: Generate key
+  command: php artisan key:generate --force
+  args:
+    chdir: /var/www/pterodactyl
+
+# if pteropanel_ssl is true
+- name: artisan p:environment:setup (SSL)
+  command: "php artisan p:environment:setup --new-salt --author=pterodactyl@pterodactyl.io --url=https://{{pteropanel_hostname}} --timezone=Europe/Brussels --cache=redis --session=redis --queue=database --settings-ui=true --telemetry=false --redis-host=127.0.0.1 --redis-pass= --redis-port=6379"
+  args:
+    chdir: /var/www/pterodactyl
+  when: pteropanel_ssl == true
+
+# if pteropanel_ssl is false
+- name: artisan p:environment:setup (non SSL)
+  command: "php artisan p:environment:setup --new-salt --author=pterodactyl@pterodactyl.io --url=http://{{pteropanel_hostname}} --timezone=Europe/Brussels --cache=redis --session=redis --queue=database --settings-ui=true --telemetry=false  --redis-host=127.0.0.1 --redis-pass= --redis-port=6379"
+  args:
+    chdir: /var/www/pterodactyl
+  when: pteropanel_ssl == false
+
+- name: artisan p:environment:database
+  command: "php artisan p:environment:database --host=localhost --port=3306 --database=pterodactyl --username=pterodactyl --password={{ pteropanel_mysql_password }}"
+  args:
+    chdir: /var/www/pterodactyl
+
+- name: artisan p:environment:mail
+  command: "php artisan p:environment:mail --driver=sendmail --email=pretoractyl{{pteropanel_hostname}} --from=pterodactyl@{{pteropanel_hostname}}"
+  args:
+    chdir: /var/www/pterodactyl
+
+- name: run migrations
+  command: "php artisan migrate --seed --force"
+  args:
+    chdir: /var/www/pterodactyl
+
+- name: create admin user
+  command: "php artisan p:user:make --email={{pteropanel_user_mail}} --username={{pteropanel_user_name}} --name-first=FIRSTNAME --name-last=LASTNAME --password={{pteropanel_user_password}} --admin=1"
+  args:
+    chdir: /var/www/pterodactyl
+
+- name: Set permissions
+  file:
+    path: /var/www/pterodactyl
+    state: directory
+    owner: www-data
+    group: www-data
+    recurse: yes
+
+# add cron job
+- name: Add cron job
+  cron:
+    name: "pterodactyl"
+    minute: "*"
+    job: "php /var/www/pterodactyl/artisan schedule:run >> /dev/null 2>&1"
+
+# copy pteroq.service from template to /etc/systemd/system
+- name: Copy pteroq.service
+  template:
+    src: pteroq.service.j2
+    dest: /etc/systemd/system/pteroq.service
+
+# enable pteroq service
+- name: Enable pteroq service
+  systemd:
+    name: pteroq
+    enabled: yes
+    state: started
+
+# remove rm /etc/nginx/sites-enabled/default
+- name: Remove default nginx site
+  file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+
+- name: install certbot
+  command: apt install certbot -y
+  args:
+    chdir: /var/www/pterodactyl
+  when: pteropanel_letsencrypt == true
+
+- name: stop Nginx
+  service:
+    name: nginx
+    state: stopped
+  when: pteropanel_letsencrypt == true
+
+- name: Get SSL certificate
+  command: certbot certonly --standalone --agree-tos --no-eff-email --email {{ pteropanel_le_email }} -d {{ pteropanel_hostname }}
+  args:
+    chdir: /var/www/pterodactyl
+  when: pteropanel_letsencrypt == true
+
+- name: start Nginx
+  service:
+    name: nginx
+    state: started
+  when: pteropanel_letsencrypt == true
+
+- name: Copy vhost confifg (non SSL)
+  template:
+    src: nginx-vhost.conf.j2
+    dest: /etc/nginx/sites-available/pterodactyl.conf
+  when: pteropanel_ssl == false
+
+- name: Copy vhost confifg (SSL,le)
+  template:
+    src: nginx-vhost-ssl-le.conf.j2
+    dest: /etc/nginx/sites-available/pterodactyl.conf
+  when: pteropanel_ssl == true and pteropanel_letsencrypt == true
+
+- name: Create symlink
+  file:
+    src: /etc/nginx/sites-available/pterodactyl.conf
+    dest: /etc/nginx/sites-enabled/pterodactyl.conf
+    state: link
+  notify: restart nginx
+

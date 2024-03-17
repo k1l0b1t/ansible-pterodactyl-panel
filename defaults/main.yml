@@ -1,0 +1,9 @@
+---
+pteropanel_hostname: "pterodactyl-panel.local"
+pteropanel_mysql_password: "pterodactyl"
+pteropanel_ssl: false
+pteropanel_letsencrypt: false
+pteropanel_le_email: "email@example.com"
+pteropanel_user_mail: "email@example.com"
+pteropanel_user_password: "password"
+pteropanel_user_name: "admin"
